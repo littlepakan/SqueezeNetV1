@@ -8,10 +8,11 @@ import cv2
 import pickle
 import os
 import pandas as pd
-import xgboost  # จำเป็นต้องมีเพื่อให้ Pickle สามารถโหลดไฟล์ XGBoost ได้
+import xgboost  # จำเป็นสำหรับการโหลดไฟล์ XGBoost
 from sklearn.neural_network import MLPClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score, roc_auc_score, confusion_matrix, cohen_kappa_score, matthews_corrcoef, classification_report
 
 # ==========================================
 # Set Streamlit Page Configuration
@@ -45,6 +46,7 @@ st.markdown("""
         border-radius: 0.5rem;
         text-align: center;
         box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        margin-bottom: 1rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -210,7 +212,6 @@ if uploaded_files:
                     df_gt = pd.read_csv(csv_file)
                     if 'img_name' in df_gt.columns and 'label' in df_gt.columns:
                         for _, row in df_gt.iterrows():
-                            # ดึงชื่อไฟล์และจำทั้งแบบมีนามสกุลและไม่มีนามสกุล (เพื่อความทนทาน)
                             raw_name = str(row['img_name']).strip()
                             base_name = os.path.splitext(raw_name)[0]
                             lbl = int(row['label'])
@@ -224,6 +225,10 @@ if uploaded_files:
 
             # --- Processing Images ---
             results = []
+            all_preds = []
+            all_labels = []
+            all_probs = []
+            
             progress_bar = st.progress(0)
             status_text = st.empty()
             
@@ -242,18 +247,32 @@ if uploaded_files:
                             outputs = dl_model(img_tensor)
                             _, preds = torch.max(outputs.data, 1)
                             prediction = preds.item()
+                            
+                            # ดึง probability
+                            probs = torch.softmax(outputs, dim=1)
+                            prob = probs[:, 1].item() 
+                            
                         else:
                             # 🌟 โหมด Machine Learning: สกัด Feature -> RFE -> Predict
                             features = dl_model(img_tensor).cpu().numpy()
                             features_opt = rfe_selector.transform(features)
                             prediction = ml_model.predict(features_opt)[0]
+                            
+                            # ดึง probability (ถ้าโมเดลรองรับ)
+                            if hasattr(ml_model, "predict_proba"):
+                                prob = ml_model.predict_proba(features_opt)[0][1]
+                            else:
+                                prob = float(prediction) # ถ้าไม่มี ให้ใช้ค่า prediction เลย
                     
                     # 3. Check against Ground Truth
-                    # พยายามค้นหาชื่อไฟล์แบบเต็มก่อน ถ้าไม่เจอให้หาแบบตัดนามสกุลออก
                     gt_label = ground_truth.get(filename, ground_truth.get(base_filename, None))
                     
                     eval_status = "ไม่มีเฉลย"
                     if gt_label is not None:
+                        all_labels.append(gt_label)
+                        all_preds.append(prediction)
+                        all_probs.append(prob)
+                        
                         if gt_label == 1 and prediction == 1:
                             eval_status = "True Positive (TP)"
                         elif gt_label == 0 and prediction == 0:
@@ -266,6 +285,7 @@ if uploaded_files:
                     results.append({
                         "Filename": filename,
                         "Prediction": "Pes Planus (1)" if prediction == 1 else "Normal (0)",
+                        "Probability": f"{prob:.4f}",
                         "Ground Truth": f"Pes Planus (1)" if gt_label == 1 else (f"Normal (0)" if gt_label == 0 else "-"),
                         "Evaluation": eval_status
                     })
@@ -282,7 +302,6 @@ if uploaded_files:
                 st.write("### 📊 ตารางสรุปผลการวินิจฉัย")
                 df_results = pd.DataFrame(results)
                 
-                # ฟังก์ชันไฮไลท์สีในตาราง
                 def highlight_eval(val):
                     if 'TP' in val or 'TN' in val:
                         return 'background-color: #D1FAE5; color: #065F46; font-weight: bold;'
@@ -293,10 +312,11 @@ if uploaded_files:
                 styled_df = df_results.style.map(highlight_eval, subset=['Evaluation'])
                 st.dataframe(styled_df, use_container_width=True)
 
-                # --- Calculate and Show Metrics if Ground Truth is provided ---
-                if len(ground_truth) > 0:
-                    st.write("### 🎯 สรุปประสิทธิภาพ (Confusion Matrix Metrics)")
+                # --- Calculate and Show Advanced Metrics if Ground Truth is provided ---
+                if len(all_labels) > 0:
+                    st.write("### 🎯 สรุปประสิทธิภาพเชิงลึก (Advanced Evaluation Metrics)")
                     
+                    # 1. Confusion Matrix
                     tp = sum(1 for r in results if 'TP' in r['Evaluation'])
                     tn = sum(1 for r in results if 'TN' in r['Evaluation'])
                     fp = sum(1 for r in results if 'FP' in r['Evaluation'])
@@ -309,12 +329,32 @@ if uploaded_files:
                     m3.markdown(f"<div class='metric-card'><h3 style='color: #DC2626;'>FP: {fp}</h3><p>False Positive</p></div>", unsafe_allow_html=True)
                     m4.markdown(f"<div class='metric-card'><h3 style='color: #DC2626;'>FN: {fn}</h3><p>False Negative</p></div>", unsafe_allow_html=True)
                     
+                    # 2. Calculate Advanced Metrics
                     if total_evaluated > 0:
-                        accuracy = ((tp + tn) / total_evaluated) * 100
+                        acc = accuracy_score(all_labels, all_preds)
+                        
+                        try:
+                            auc = roc_auc_score(all_labels, all_probs)
+                        except ValueError:
+                            auc = 0.5 # ป้องกัน error หากมีข้อมูลแค่คลาสเดียว
+                            
+                        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+                        kappa = cohen_kappa_score(all_labels, all_preds)
+                        mcc = matthews_corrcoef(all_labels, all_preds)
+                        
                         st.markdown(f"""
-                        <div style='background-color: #EFF6FF; padding: 1.5rem; border-radius: 0.5rem; text-align: center; margin-top: 1.5rem; border: 1px solid #BFDBFE;'>
-                            <h2 style='color: #1D4ED8; margin: 0;'>ความแม่นยำรวม (Accuracy): {accuracy:.2f}%</h2>
-                            <p style='margin: 0; color: #3B82F6;'>จากจำนวนภาพที่มีเฉลยทั้งหมด {total_evaluated} ภาพ | ทดสอบด้วย {dl_model_choice} + {classifier_choice}</p>
+                        <div style='background-color: #EFF6FF; padding: 1.5rem; border-radius: 0.5rem; border: 1px solid #BFDBFE;'>
+                            <h4 style='color: #1D4ED8; margin-top: 0; text-align: center;'>ประสิทธิภาพรวม (Overall Performance)</h4>
+                            <p style='text-align: center; color: #3B82F6; margin-bottom: 1.5rem;'>
+                                <b>โมเดล:</b> {dl_model_choice} + {classifier_choice} | <b>จำนวนภาพทดสอบ:</b> {total_evaluated} ภาพ
+                            </p>
+                            <ul style='list-style-type: none; padding-left: 0; font-size: 1.1rem; color: #1E3A8A; display: grid; grid-template-columns: 1fr 1fr; gap: 10px;'>
+                                <li>📌 <b>Accuracy:</b> {acc * 100:.2f}%</li>
+                                <li>📌 <b>AUC Score:</b> {auc:.4f}</li>
+                                <li>📌 <b>Specificity:</b> {specificity:.4f}</li>
+                                <li>📌 <b>Cohen's Kappa:</b> {kappa:.4f}</li>
+                                <li>📌 <b>MCC Score:</b> {mcc:.4f}</li>
+                            </ul>
                         </div>
                         """, unsafe_allow_html=True)
 else:
