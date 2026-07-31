@@ -54,7 +54,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Application Title
-st.markdown('<div class="main-header">🦶 ระบบวินิจฉัยภาวะเท้าแบนด้วย AI (SqueezeNet + SVM)</div>', unsafe_unsafe_html=True if hasattr(st, 'unsafe_unsafe_html') else True)
+st.markdown('<div class="main-header">🦶 ระบบวินิจฉัยภาวะเท้าแบนด้วย AI (SqueezeNet + SVM)</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">Deep Learning Diagnosis of Pes Planus via Calcaneal Inclusion Angle Feature Extraction</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------
